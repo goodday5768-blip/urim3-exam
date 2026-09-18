@@ -324,10 +324,11 @@ function paintSel() {
 
 // ---- 출제 ----
 // 한 지문에서 need개: 이 범위로 푸는 동안(cur.seen) 이미 나온 문항은 피하고, 그다음 덜 나온 문항, 유형은 겹치지 않게
-function pickItems(pi, need, seen) {
+function pickItems(pi, need, seen, hist) {
   const p = D.P[pi], u = use[p.id] || (use[p.id] = {});
   const fresh = k => seen.has(pi + ':' + k) ? 0 : 1;
-  const order = shuffle(p.items.map((_, k) => k)).sort((a, b) => (fresh(b) - fresh(a)) || ((u[a] || 0) - (u[b] || 0)));
+  const load = k => hist ? fixedAns(p.items[k]).reduce((m, a) => m + hist[a], 0) : 0;   // 이 문항의 고정 정답 번호가 회차에 이미 나온 횟수
+  const order = shuffle(p.items.map((_, k) => k)).sort((a, b) => (fresh(b) - fresh(a)) || (load(a) - load(b)) || ((u[a] || 0) - (u[b] || 0)));
   const out = [], types = new Set();
   for (const k of order) if (out.length < need && !types.has(p.items[k].t)) { out.push(k); types.add(p.items[k].t); }
   for (const k of order) if (out.length < need && !out.includes(k)) out.push(k);
@@ -349,18 +350,39 @@ function roundPlan(indices, seen) {
     for (const q of queues) { if (total >= D.cap) break; if (q.length) { plan.set(q.shift(), 1); total++; } }
   return plan;
 }
-function mcPart(s) {       // 보기 섞기 + 해설 번호 치환
-  const perm = s.sh ? shuffle([0, 1, 2, 3, 4]) : [0, 1, 2, 3, 4];
+// 문항의 고정(섞지 않는) 정답 번호들 — 회차 균등 계산용. 섞는 유형·서답형은 빈 배열.
+function fixedAns(it) {
+  if ('ch' in it) return it.sh ? [] : [it.a];
+  if (it.t === 'longset') return it.sub.filter(x => !x.sh).map(x => x.a);
+  return [];
+}
+// 회차 정답 번호 균등(2026-09-18 사용자 확정: 정답이 한 번호에 몰리면 안 된다)
+// 섞는 유형(제목·주제·함의·빈칸·요약)은 정답을 회차에서 가장 덜 나온 번호 자리에 두고(동률은 무작위, 직전 문제 정답과 같은 자리는 피함),
+// 고정 유형(어법·어휘·순서·삽입·무관·불일치 등)은 지문 안에서 덜 나온 번호의 문항을 먼저 고른다(pickItems load).
+function balancedSlot(hist, prev) {
+  const min = Math.min(...hist);
+  let c = [0, 1, 2, 3, 4].filter(i => hist[i] === min);
+  if (c.length > 1 && prev !== null && c.includes(prev)) c = c.filter(i => i !== prev);
+  return c[Math.random() * c.length | 0];
+}
+function mcPart(s, target) {       // 보기 섞기 + 해설 번호 치환. target(0~4)이 있으면 정답을 그 자리에 둔다
+  let perm = s.sh ? shuffle([0, 1, 2, 3, 4]) : [0, 1, 2, 3, 4];
+  if (s.sh && target !== undefined) { const i = perm.indexOf(s.a); [perm[i], perm[target]] = [perm[target], perm[i]]; }
   const ex = s.ex.replace(/[①-⑤]/g, c => CIRC[perm.indexOf(CIRC.indexOf(c))]);
   return {kind: 'choice', ins: s.ins, opts: perm.map(i => s.ch[i]), ans: perm.indexOf(s.a), ex};
 }
-function buildQuestion(pi, k) {
+function buildQuestion(pi, k, bal) {
   const p = D.P[pi], it = p.items[k], where = `${D.groups[p.g].name} ${p.l}`;
   const q = {pi, k, t: it.t, ko: D.typeKo[it.t] || it.ko || it.t, where, parts: []};
+  const mc = s => {                                   // 선택형 한 부분: 균등 목표 자리 계산 + 회차 히스토그램 갱신
+    const part = mcPart(s, bal && s.sh ? balancedSlot(bal.hist, bal.prev) : undefined);
+    if (bal) { if (s.sh) bal.hist[part.ans]++; bal.prev = part.ans; }
+    return part;
+  };
   if ('html' in it) {                              // 범용 형식(빈 지문 '' 도 범용 — 선지만 있는 어휘·짝대화): 지문 HTML 완성본 + 선지 또는 단답
     q.ins = it.ins; q.html = it.html;
     if (it.subs) it.subs.forEach((s, i) => q.parts.push({kind: 'text', prompt: s.p, ans: s.a, ph: s.ph, ex: i === 0 ? it.ex : ''}));
-    else { const part = mcPart(it); part.ins = ''; q.parts.push(part); q.en = /[A-Za-z]{3}/.test(it.ch.join('')); }
+    else { const part = mc(it); part.ins = ''; q.parts.push(part); q.en = /[A-Za-z]{3}/.test(it.ch.join('')); }
     return q;
   }
   if (it.t === 'sa1') {
@@ -374,20 +396,28 @@ function buildQuestion(pi, k) {
       return `<span class="nemo">${lab} [ ${a} / ${b} ]</span>`;
     });
   } else if (it.t === 'longset') {
-    q.ins = it.ins; q.psg = paras(it.psg); it.sub.forEach(s => q.parts.push(mcPart(s)));
+    q.ins = it.ins; q.psg = paras(it.psg); it.sub.forEach(s => q.parts.push(mc(s)));
   } else {
-    const part = mcPart(it); q.ins = part.ins; q.giv = it.giv; q.box = it.box; q.psg = paras(it.psg);
+    const part = mc(it); q.ins = part.ins; q.giv = it.giv; q.box = it.box; q.psg = paras(it.psg);
     q.en = ['title', 'topic', 'implication', 'blank', 'summary'].includes(it.t); part.ins = ''; q.parts.push(part);
   }
   return q;
 }
 function makeRound(indices) {
-  const qs = [];
-  for (const [pi, n] of roundPlan(indices, cur.seen)) if (n) for (const k of pickItems(pi, n, cur.seen)) qs.push(buildQuestion(pi, k));
+  const plan = roundPlan(indices, cur.seen), picked = [], hist = [0, 0, 0, 0, 0];
+  for (const pi of shuffle([...plan.keys()])) if (plan.get(pi)) for (const k of pickItems(pi, plan.get(pi), cur.seen, hist)) {
+    picked.push([pi, k]); fixedAns(D.P[pi].items[k]).forEach(a => hist[a]++);
+  }
+  const bal = {hist, prev: null};                 // 고정 정답을 센 뒤, 지문 순서대로 만들면서 섞는 유형이 빈 번호를 채운다
+  const qs = picked.sort((a, b) => a[0] - b[0]).map(([pi, k]) => buildQuestion(pi, k, bal));
   store.set('use', use);
   if (!chkRound(qs)) console.error('누출 규칙 위반: 한 회에 같은 지문이 두 번');
+  const ah = ansHist(qs), n = ah.reduce((a, b) => a + b, 0);
+  if (n && Math.max(...ah) > Math.ceil(n / 5) + 2) console.warn('정답 번호 쏠림: ' + ah.join('/'));
   return qs;
 }
+// 회차의 정답 번호 히스토그램(선택형 부분만)
+const ansHist = qs => { const h = [0, 0, 0, 0, 0]; qs.forEach(q => q.parts.forEach(p => { if (p.kind === 'choice') h[p.ans]++; })); return h; };
 // 회차 검사: 지문(pi) 중복 0 이어야 한다
 const chkRound = qs => new Set(qs.map(q => q.pi)).size === qs.length && chkBalance(qs);
 // 균등 검사: 고른 지문이 cap을 넘었을 때 영역별 문제 수 차이가 1 이하(지문이 모자란 영역은 제외)
